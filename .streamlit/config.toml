@@ -1,0 +1,22 @@
+[theme]
+base = "light"
+# Warm Navarra palette: cream paper, warm ink, Navarra red as the only accent
+primaryColor = "#B3122E"
+backgroundColor = "#FBF6EE"
+secondaryBackgroundColor = "#F3EADC"
+textColor = "#2B2420"
+linkColor = "#B3122E"
+borderColor = "#E6DACA"
+baseRadius = "0.75rem"
+showSidebarBorder = true
+font = "Inter:https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap"
+
+[theme.sidebar]
+backgroundColor = "#F5EDE1"
+secondaryBackgroundColor = "#EDE2D2"
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "minimal"
