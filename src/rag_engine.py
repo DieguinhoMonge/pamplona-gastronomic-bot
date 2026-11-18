@@ -1,6 +1,9 @@
+import math
 import os
 import re
 import time
+import unicodedata
+from collections import Counter
 from functools import lru_cache
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
@@ -8,6 +11,7 @@ from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
+from langchain_core.documents import Document
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
@@ -86,7 +90,10 @@ def restaurant_from_path(path: str) -> str:
 def get_vectorstore():
     """Load (or build on first run) the Chroma store. Cached: the embedding model
     is loaded once per process instead of on every question."""
-    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
+    # Normalized vectors -> Chroma's L2 distance maps to cosine similarity (cos = 1 - d/2),
+    # which gives the UI a meaningful 0-1 relevance score.
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL,
+                                       encode_kwargs={"normalize_embeddings": True})
 
     if os.path.exists(CHROMA_DIR) and os.listdir(CHROMA_DIR):
         return Chroma(
@@ -103,6 +110,115 @@ def get_vectorstore():
         collection_name=COLLECTION_NAME,
         persist_directory=CHROMA_DIR
     )
+
+
+# --------------------------------------------------------------------------- prompt
+# Written in English: the model follows English instructions more reliably, and the
+# examples pin down the borderline cases we saw in testing ("chocolate", "good pintxos").
+SYSTEM_PROMPT = """You are Txoko, a food guide for the restaurants of Pamplona and Navarra.
+You answer ONLY from the CONTEXT below: excerpts (in Spanish) from the guide's restaurant documents.
+
+HOW TO ANSWER
+- If the CONTEXT contains anything related to the question, answer with it. Partial answers are fine:
+  give what the context has and briefly say what is missing.
+- Short or one-word questions are valid searches. "chocolate" means "which dishes in the guide have
+  chocolate?": list every matching dish in the context with its restaurant and price.
+- Subjective questions ("good", "best", "recommend") are valid: don't rank by opinion, present the
+  matching options from the context with their details.
+- Dietary questions (e.g. "vegetarian"): list dishes whose ingredients in the context contain no meat
+  or fish, and say that the guide does not label dishes as vegetarian.
+- Never invent dishes, prices, places or facts that are not in the context.
+- Be concise and use bullet lists for dishes. Do not greet or introduce yourself.
+- Language: reply in the language requested at the end of the user's message. Translate the
+  information, but keep dish and restaurant names as written.
+
+WHEN NOT TO ANSWER (start the reply with the tag [NO_CONTEXT])
+- The question is not about food/restaurants (history, geography, politics, general knowledge...)
+  or it is about places outside Pamplona/Navarra. After the tag, politely say you only know the
+  restaurants in the guide.
+- The message is gibberish (e.g. "asdkjh qwe"). After the tag, ask the user to rephrase.
+  A real food word is never gibberish.
+- Never use the tag if you are listing any dish or restaurant from the context.
+
+Examples:
+- "chocolate" -> list of chocolate desserts with restaurant and price (no tag)
+- "Where can I eat good pintxos?" -> the restaurants in the context that serve pintxos (no tag)
+- "What happened in America in 1997?" -> [NO_CONTEXT] + "I only know about the restaurants in the guide..."
+
+CONTEXT
+{context}"""
+
+_SPANISH_HINTS = re.compile(
+    r"[¿¡ñáéíóú]|\b(qué|que|dónde|donde|cuál|cual|cuánto|cuanto|cómo|como|el|la|los|las|de|del|"
+    r"hay|tiene|tienen|quiero|busco|restaurantes?|platos?|mejor|para|con|y|es|un|una)\b", re.I)
+
+
+def detect_language(text: str) -> str:
+    """Tiny heuristic: Spanish if the question shows Spanish markers, otherwise English.
+    (Single food words like 'chocolate' default to English, matching the UI language.)"""
+    return "Spanish" if len(_SPANISH_HINTS.findall(text)) >= 1 and not re.search(
+        r"\b(the|what|where|which|how|is|are|can|do|does|i|you)\b", text, re.I) else "English"
+
+
+# --------------------------------------------------------------------------- hybrid retrieval
+# Semantic search alone misses rare exact words (e.g. "pintxos" appears in only one PDF),
+# so we also run a BM25 keyword search and fuse both rankings (Reciprocal Rank Fusion).
+
+def _tokens(text: str) -> list[str]:
+    text = unicodedata.normalize("NFKD", text.lower())
+    text = "".join(c for c in text if not unicodedata.combining(c))  # strip accents
+    words = re.findall(r"[a-z0-9]+", text)
+    # very light stemming (drop plural "s") so "pintxos" matches "pintxo", "chocolates" matches "chocolate"
+    return [w[:-1] if w.endswith("s") and len(w) > 3 else w for w in words if w not in _STOPWORDS]
+
+
+_STOPWORDS = set("""a al and are de del el en es esta este for good how i in is it la las los me my
+of on que the to un una what where which with y can eat do does tiene hay donde cual cuales
+restaurante restaurant restaurantes restaurants mejor best""".split())
+
+
+@lru_cache(maxsize=1)
+def _bm25_index():
+    """Tokenized chunks + document frequencies, built once from the Chroma collection."""
+    data = get_vectorstore().get(include=["documents", "metadatas"])
+    docs = [Document(page_content=t, metadata=m) for t, m in zip(data["documents"], data["metadatas"])]
+    toks = [_tokens(d.page_content) for d in docs]
+    df = Counter(w for t in toks for w in set(t))
+    avgdl = sum(len(t) for t in toks) / max(len(toks), 1)
+    return docs, toks, df, avgdl
+
+
+def _bm25_search(query: str, k: int, k1: float = 1.5, b: float = 0.75) -> list[Document]:
+    docs, toks, df, avgdl = _bm25_index()
+    q = set(_tokens(query))
+    n = len(docs)
+    scored = []
+    for doc, t in zip(docs, toks):
+        tf = Counter(t)
+        s = sum(math.log(1 + (n - df[w] + 0.5) / (df[w] + 0.5)) * tf[w] * (k1 + 1)
+                / (tf[w] + k1 * (1 - b + b * len(t) / avgdl)) for w in q if tf[w])
+        if s > 0:
+            scored.append((s, doc))
+    scored.sort(key=lambda x: -x[0])
+    return [d for _, d in scored[:k]]
+
+
+def hybrid_search(query: str, k: int, rrf_k: int = 60) -> list[tuple[Document, float]]:
+    """Return the top-k chunks as (doc, cosine_similarity), fusing semantic + keyword ranks."""
+    vectorstore = get_vectorstore()
+    n_total = vectorstore._collection.count()
+    semantic = vectorstore.similarity_search_with_score(query, k=n_total)  # all chunks; corpus is tiny
+    cosine = {d.page_content: round(max(0.0, 1 - float(dist) / 2), 3) for d, dist in semantic}
+    keyword = _bm25_search(query, k=max(k * 3, 10))
+
+    fused: dict[str, float] = {}
+    by_text: dict[str, Document] = {}
+    for ranking in ([d for d, _ in semantic[: max(k * 3, 10)]], keyword):
+        for rank, d in enumerate(ranking):
+            fused[d.page_content] = fused.get(d.page_content, 0.0) + 1.0 / (rrf_k + rank + 1)
+            by_text[d.page_content] = d
+    best = sorted(fused, key=lambda t: -fused[t])[:k]
+    return [(by_text[t], cosine.get(t, 0.0)) for t in best]
 
 
 def ask(question: str, history: list[dict] | None = None, settings: dict | None = None) -> RAGResponse:
@@ -138,7 +254,9 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
                 (
                     "system",
                     "Reescribe la última pregunta del usuario como una pregunta completa e independiente "
-                    "usando el historial, sin responderla. Si ya es independiente, devuélvela igual."
+                    "usando el historial, sin responderla. Usa el historial SOLO si la pregunta depende de él "
+                    "(p. ej. 'and how much is it?', '¿y el postre?'). Si cambia de tema o ya es independiente, "
+                    "devuélvela EXACTAMENTE igual. Devuelve solo la pregunta."
                 ),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("human", "{input}")
@@ -150,17 +268,15 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
             }).strip()
 
         t0 = time.perf_counter()
-        vectorstore = get_vectorstore()
-        results = vectorstore.similarity_search_with_score(search_query, k=top_k)
+        results = hybrid_search(search_query, k=top_k)
         retrieval_ms = round((time.perf_counter() - t0) * 1000, 1)
 
         sources = []
         context_blocks = []
-        for doc, dist in results:
+        for doc, relevance in results:
             file_name = os.path.basename(doc.metadata.get("source", "documento.pdf"))
-            restaurant_name = re.sub(r"^\d+\.\s*", "", os.path.splitext(file_name)[0]).replace("_", " ")
+            restaurant_name = restaurant_from_path(file_name)
             page_num = int(doc.metadata.get("page", 0)) + 1
-            relevance = round(1.0 / (1.0 + float(dist)), 3)
 
             sources.append(Source(
                 restaurant=restaurant_name,
@@ -173,30 +289,10 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
 
         context_text = "\n\n".join(context_blocks)
 
-        system_prompt = (
-            "Eres Txoko, un asistente gastronómico experto en restaurantes de Pamplona y Navarra. "
-            "Responde basándote únicamente en el contexto proporcionado.\n"
-            "IDIOMA: responde SIEMPRE en el idioma de la última pregunta del usuario. "
-            "Si pregunta en inglés, responde en inglés aunque el contexto esté en español "
-            "(traduce la información, pero mantén los nombres de platos y restaurantes tal cual). "
-            "Si pregunta en español, responde en español.\n\n"
-            "Reglas estrictas:\n"
-            "1. Si la pregunta es ininteligible o no tiene sentido, empieza tu respuesta con '[NO_CONTEXT]' "
-            "y pide amablemente al usuario que reformule su consulta.\n"
-            "2. Si la respuesta no está en el contexto (restaurantes fuera de Pamplona/Navarra o temas ajenos "
-            "a la gastronomía de la guía), empieza tu respuesta con '[NO_CONTEXT]' y explica amablemente "
-            "que solo tienes información sobre los restaurantes de Pamplona y Navarra de la guía.\n"
-            "3. No inventes platos, precios, ubicaciones ni datos externos.\n"
-            "4. Sé claro, cordial y directo. No te presentes ni saludes en cada respuesta.\n"
-            "5. Las reglas 1 y 2 también siguen la regla de IDIOMA: si la pregunta está en inglés, "
-            "la respuesta después de '[NO_CONTEXT]' debe estar en inglés.\n\n"
-            "Contexto:\n{context}"
-        )
-
         prompt = ChatPromptTemplate.from_messages([
-            ("system", system_prompt),
+            ("system", SYSTEM_PROMPT),
             MessagesPlaceholder(variable_name="chat_history"),
-            ("human", "{input}")
+            ("human", "{input}\n\n[Reply in {language}.]")
         ])
 
         t1 = time.perf_counter()
@@ -204,7 +300,8 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
         raw_answer = chain.invoke({
             "context": context_text,
             "chat_history": chat_history,
-            "input": question
+            "input": question,
+            "language": detect_language(question),
         }).strip()
         generation_ms = round((time.perf_counter() - t1) * 1000, 1)
 
