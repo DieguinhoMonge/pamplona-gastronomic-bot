@@ -1,16 +1,16 @@
 import os
 import re
 import time
+from functools import lru_cache
 from dotenv import load_dotenv
 from langchain_community.document_loaders import PyPDFLoader
-from langchain_text_splitters import CharacterTextSplitter
-from langchain_community.embeddings import HuggingFaceEmbeddings
+from langchain_text_splitters import RecursiveCharacterTextSplitter
+from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_chroma import Chroma
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langchain_core.prompts import ChatPromptTemplate, MessagesPlaceholder
 from langchain_core.messages import HumanMessage, AIMessage
 from langchain_core.output_parsers import StrOutputParser
-from langchain_core.runnables import RunnablePassthrough
 
 from frontend.backend_interface import (
     Source,
@@ -19,11 +19,19 @@ from frontend.backend_interface import (
     BackendError,
 )
 
-load_dotenv()
+from frontend.config import CHROMA_DIR as _CHROMA_PATH, DOCS_DIR, ROOT
 
-DATA_DIR = "data"
-CHROMA_DIR = "chroma_db"
+load_dotenv(ROOT / ".env")
+
+# Absolute paths, so the app works no matter which folder it is launched from.
+DATA_DIR = str(DOCS_DIR)
+CHROMA_DIR = str(_CHROMA_PATH)
 COLLECTION_NAME = "pamplona_restaurants"
+# Multilingual: the PDFs are in Spanish and users ask in English or Spanish.
+# (all-MiniLM-L6-v2 is English-only and missed Spanish queries in our tests: 6/8 vs 7/8.)
+# Changing this requires deleting chroma_db/ so the index is rebuilt.
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_MODEL = "gemini-3.5-flash-lite"
 
 
 def load_documents(data_path=DATA_DIR):
@@ -51,16 +59,34 @@ def load_documents(data_path=DATA_DIR):
 
 
 def split_documents(docs, chunk_size=600, chunk_overlap=80):
-    text_splitter = CharacterTextSplitter(
-        separator="\n",
+    # Dishes wrap over several lines in the PDFs, so splitting on every "\n" cut
+    # dishes in half (name + price in one chunk, ingredients in the next). Split on
+    # dish bullets ("• ", "* ") or numbered items ("3. ") first, so each dish stays whole.
+    text_splitter = RecursiveCharacterTextSplitter(
+        separators=[r"\n(?=[•*] )", r"\n(?=\d+\.\s)", r"\n", r" "],
+        is_separator_regex=True,
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap
     )
-    return text_splitter.split_documents(docs)
+    chunks = text_splitter.split_documents(docs)
+    # Prefix every chunk with its restaurant, so a dish chunk still "knows" which
+    # restaurant it belongs to (improves retrieval for "Hamburguesa Babylon", etc.).
+    for chunk in chunks:
+        chunk.page_content = f"Restaurante: {restaurant_from_path(chunk.metadata.get('source', ''))}\n{chunk.page_content}"
+    return chunks
 
 
+def restaurant_from_path(path: str) -> str:
+    """'data/11. Restaurante_Tubal.pdf' -> 'Restaurante Tubal'."""
+    stem = os.path.splitext(os.path.basename(path))[0]
+    return re.sub(r"^\d+\.\s*", "", stem).replace("_", " ")
+
+
+@lru_cache(maxsize=1)
 def get_vectorstore():
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    """Load (or build on first run) the Chroma store. Cached: the embedding model
+    is loaded once per process instead of on every question."""
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
     if os.path.exists(CHROMA_DIR) and os.listdir(CHROMA_DIR):
         return Chroma(
@@ -79,63 +105,23 @@ def get_vectorstore():
     )
 
 
-def get_rag_chain():
-    api_key = os.getenv("GOOGLE_API_KEY")
-    if not api_key or api_key == "tu_api_key_aqui":
-        raise ValueError("Configura una GOOGLE_API_KEY válida en el archivo .env")
-
-    vectorstore = get_vectorstore()
-    retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
-
-    llm = ChatGoogleGenerativeAI(
-        model="gemini-3.5-flash-lite",
-        google_api_key=api_key.strip()
-    )
-
-    system_prompt = (
-        "Eres un asistente gastronómico experto en restaurantes de Pamplona y Navarra. "
-        "Responde a las preguntas del usuario utilizando únicamente la información del contexto proporcionado.\n\n"
-        "Reglas estrictas:\n"
-        "1. Si la respuesta no está en el contexto, responde exactamente: "
-        "'No dispongo de esa información en la guía gastronómica.'\n"
-        "2. No inventes platos, precios, ubicaciones ni datos externos.\n"
-        "3. Mantén un tono cordial,amable, claro y conciso.\n\n"
-        "Contexto:\n{context}"
-    )
-
-    prompt = ChatPromptTemplate.from_messages([
-        ("system", system_prompt),
-        MessagesPlaceholder(variable_name="chat_history"),
-        ("human", "{input}")
-    ])
-
-    def format_docs(docs):
-        return "\n\n".join(doc.page_content for doc in docs)
-
-    return (
-        RunnablePassthrough.assign(
-            context=lambda x: format_docs(retriever.invoke(x["input"]))
-        )
-        | prompt
-        | llm
-        | StrOutputParser()
-    )
-
-
 def ask(question: str, history: list[dict] | None = None, settings: dict | None = None) -> RAGResponse:
     history = history or []
     settings = settings or {}
 
     api_key = os.getenv("GOOGLE_API_KEY") or os.getenv("GEMINI_API_KEY")
-    if not api_key or api_key == "tu_api_key_aqui":
-        raise BackendConnectionError("Falta configurar GOOGLE_API_KEY en el archivo .env.")
+    if not api_key or api_key.strip() == "tu_api_key_aqui":
+        # BackendError (not ConnectionError) so the UI shows this exact message.
+        raise BackendError("Falta configurar GOOGLE_API_KEY en el archivo .env.")
 
     top_k = int(settings.get("top_k", 4))
-    model_name = settings.get("model") or "gemini-3.5-flash-lite"
+    model_name = settings.get("model") or DEFAULT_MODEL
+    temperature = float(settings.get("temperature", 0.2))
 
     try:
         llm = ChatGoogleGenerativeAI(
             model=model_name,
+            temperature=temperature,
             google_api_key=api_key.strip()
         )
 
@@ -189,16 +175,21 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
 
         system_prompt = (
             "Eres Txoko, un asistente gastronómico experto en restaurantes de Pamplona y Navarra. "
-            "Responde en el mismo idioma en el que pregunte el usuario (español o inglés) "
-            "basándote únicamente en el contexto proporcionado.\n\n"
+            "Responde basándote únicamente en el contexto proporcionado.\n"
+            "IDIOMA: responde SIEMPRE en el idioma de la última pregunta del usuario. "
+            "Si pregunta en inglés, responde en inglés aunque el contexto esté en español "
+            "(traduce la información, pero mantén los nombres de platos y restaurantes tal cual). "
+            "Si pregunta en español, responde en español.\n\n"
             "Reglas estrictas:\n"
             "1. Si la pregunta es ininteligible o no tiene sentido, empieza tu respuesta con '[NO_CONTEXT]' "
             "y pide amablemente al usuario que reformule su consulta.\n"
             "2. Si la respuesta no está en el contexto (restaurantes fuera de Pamplona/Navarra o temas ajenos "
             "a la gastronomía de la guía), empieza tu respuesta con '[NO_CONTEXT]' y explica amablemente "
-            "que solo dispones de información sobre los restaurantes de Pamplona y Navarra de los documentos.\n"
+            "que solo tienes información sobre los restaurantes de Pamplona y Navarra de la guía.\n"
             "3. No inventes platos, precios, ubicaciones ni datos externos.\n"
-            "4. Sé claro, cordial y directo.\n\n"
+            "4. Sé claro, cordial y directo. No te presentes ni saludes en cada respuesta.\n"
+            "5. Las reglas 1 y 2 también siguen la regla de IDIOMA: si la pregunta está en inglés, "
+            "la respuesta después de '[NO_CONTEXT]' debe estar en inglés.\n\n"
             "Contexto:\n{context}"
         )
 
