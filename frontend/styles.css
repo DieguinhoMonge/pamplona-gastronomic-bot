@@ -1,0 +1,125 @@
+/* Txoko UI layer. All selectors that depend on Streamlit internals
+   (data-testid / st-key-* classes) live in this file. Pinned to streamlit==1.67.0. */
+@import url('https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600&display=swap');
+
+:root {
+  --txk-red: #B3122E;
+  --txk-wine: #6E1423;
+  --txk-cream: #FBF6EE;
+  --txk-paper: #FFFDF9;
+  --txk-sand: #F1E6D6;
+  --txk-border: #E6DACA;
+  --txk-text: #2B2420;
+  --txk-muted: #8A7B6E;
+  --txk-amber: #A15C00;
+  --txk-rose: #F6DDE1;
+}
+
+/* ---------------------------------------------------------------- chrome */
+[data-testid="stDecoration"] { display: none; }
+header[data-testid="stHeader"] { background: transparent; }
+.stMainBlockContainer { max-width: 780px; padding-top: 2.2rem; padding-bottom: 8rem; }
+
+/* ---------------------------------------------------------------- empty state */
+.txk-hero { text-align: center; margin-top: 14vh; margin-bottom: .6rem; }
+.txk-wordmark {
+  font-family: 'Playfair Display', Georgia, serif; font-weight: 600;
+  font-size: 3.2rem; letter-spacing: .02em; color: var(--txk-red); line-height: 1.1;
+}
+.txk-sub { color: var(--txk-muted); font-size: 1.02rem; margin-top: .35rem; }
+.st-key-hero_input [data-testid="stChatInput"] { box-shadow: 0 6px 28px rgba(110, 20, 35, .08); }
+
+/* ---------------------------------------------------------------- chat input */
+[data-testid="stChatInput"] { border-radius: 22px; background: var(--txk-paper); }
+[data-testid="stChatInputSubmitButton"] { background: var(--txk-red); color: #fff; border-radius: 50%; }
+[data-testid="stBottom"] > div { background: var(--txk-cream); }
+
+/* ---------------------------------------------------------------- user bubble */
+[class*="st-key-u_"] {
+  width: fit-content !important; max-width: 80%; margin-left: auto;
+  background: var(--txk-sand); border-radius: 18px 18px 4px 18px;
+  padding: .6rem 1rem; margin-top: 1.6rem;
+}
+[class*="st-key-u_"] p { margin: 0; }
+
+/* ---------------------------------------------------------------- assistant answer */
+[class*="st-key-a_"] { margin-top: .6rem; }
+.txk-label {
+  font-size: .7rem; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--txk-muted); margin: .35rem 0 .1rem 0;
+}
+.txk-progress { color: var(--txk-muted); font-size: .85rem; display: flex; align-items: center; gap: .45rem; }
+.txk-progress svg { width: 15px; height: 15px; fill: currentColor; }
+.txk-progress.running span {
+  background: linear-gradient(90deg, var(--txk-muted) 0%, var(--txk-text) 50%, var(--txk-muted) 100%);
+  background-size: 200% 100%; -webkit-background-clip: text; background-clip: text; color: transparent;
+  animation: txk-shimmer 1.4s linear infinite;
+}
+@keyframes txk-shimmer { from { background-position: 200% 0; } to { background-position: -200% 0; } }
+.txk-notfound {
+  color: var(--txk-amber); font-size: .85rem; display: flex; align-items: center; gap: .45rem;
+  border-left: 2px solid var(--txk-amber); padding-left: .6rem;
+}
+.txk-notfound svg { width: 15px; height: 15px; fill: currentColor; }
+sup.cite {
+  background: var(--txk-rose); color: var(--txk-red); font-size: .66rem; font-weight: 700;
+  border-radius: 5px; padding: .05rem .32rem; margin-left: 2px; vertical-align: super;
+}
+.txk-caret { display: inline-block; width: .5rem; height: 1rem; background: var(--txk-red);
+  margin-left: 2px; vertical-align: text-bottom; animation: txk-blink 1s step-end infinite; }
+@keyframes txk-blink { 50% { opacity: 0; } }
+
+/* source cards */
+[class*="st-key-src_"] [data-testid="stPopoverButton"] {
+  width: 100%; justify-content: flex-start; text-align: left; position: relative;
+  background: var(--txk-paper); border: 1px solid var(--txk-border); border-radius: 12px;
+  padding: .5rem .75rem 1.05rem .75rem; min-height: 3.1rem;
+}
+[class*="st-key-src_"] [data-testid="stPopoverButton"]:hover { border-color: var(--txk-red); }
+[class*="st-key-src_"] [data-testid="stPopoverButton"] p {
+  font-size: .82rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+[class*="st-key-src_"] [data-testid="stPopoverButton"]::before,
+[class*="st-key-src_"] [data-testid="stPopoverButton"]::after {
+  content: ""; position: absolute; left: .75rem; bottom: .45rem; height: 3px; border-radius: 2px;
+}
+[class*="st-key-src_"] [data-testid="stPopoverButton"]::before { right: .75rem; background: var(--txk-sand); }
+[class*="st-key-src_"] [data-testid="stPopoverButton"]::after {
+  width: calc((100% - 1.5rem) * var(--rel, 0)); background: var(--txk-red); opacity: .8;
+}
+.txk-src-head { font-size: .8rem; color: var(--txk-muted); margin-bottom: .3rem; }
+
+/* action row */
+[class*="st-key-act_"] { opacity: .6; transition: opacity .15s; margin-top: -.3rem; }
+[class*="st-key-act_"]:hover { opacity: 1; }
+[class*="st-key-act_"] button { color: var(--txk-muted); }
+.txk-copy {
+  border: none; background: none; color: var(--txk-muted); cursor: pointer;
+  padding: .3rem; border-radius: 8px; display: inline-flex; align-items: center;
+}
+.txk-copy:hover { background: var(--txk-sand); color: var(--txk-text); }
+.txk-copy svg { width: 17px; height: 17px; fill: currentColor; }
+.txk-copy .ok { display: none; }
+.txk-copy.done .ok { display: inline; }
+.txk-copy.done .cp { display: none; }
+
+/* error card */
+[class*="st-key-err_"] {
+  border: 1px solid var(--txk-border); background: #FFF6EC; border-radius: 12px;
+  padding: .8rem 1rem; margin-top: .6rem;
+}
+.txk-err { color: var(--txk-wine); font-size: .92rem; display: flex; gap: .5rem; align-items: center; }
+.txk-err svg { width: 17px; height: 17px; fill: currentColor; }
+
+/* ---------------------------------------------------------------- sidebar */
+.txk-brand { font-family: 'Playfair Display', Georgia, serif; font-size: 1.6rem; color: var(--txk-red); }
+.txk-group { font-size: .7rem; font-weight: 600; letter-spacing: .09em; text-transform: uppercase;
+  color: var(--txk-muted); margin: 1rem 0 .2rem .2rem; }
+[class*="st-key-conv_"] button { justify-content: flex-start; width: 100%; padding: .35rem .6rem; }
+[class*="st-key-conv_"] button p {
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; font-size: .88rem; text-align: left;
+}
+.txk-status { font-size: .8rem; color: var(--txk-muted); display: flex; align-items: center; gap: .45rem; }
+.txk-dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; }
+.txk-dot.mock { background: #E0A100; }
+.txk-dot.live { background: #2E9E5B; }
