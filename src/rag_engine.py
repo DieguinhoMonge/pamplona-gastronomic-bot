@@ -35,7 +35,12 @@ COLLECTION_NAME = "pamplona_restaurants"
 # (all-MiniLM-L6-v2 is English-only and missed Spanish queries in our tests: 6/8 vs 7/8.)
 # Changing this requires deleting chroma_db/ so the index is rebuilt.
 EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
-DEFAULT_MODEL = "gemini-3.5-flash-lite"
+DEFAULT_LLM_MODEL = "gemini-3.5-flash-lite"
+MAX_HISTORY_MESSAGES = 6  # Moving window: últimos 3 turnos (usuario + asistente)
+
+
+def _extract_restaurant_name(file_name: str) -> str:
+    return re.sub(r"^\d+\.\s*", "", os.path.splitext(file_name)[0]).replace("_", " ")
 
 
 def load_documents(data_path=DATA_DIR):
@@ -49,12 +54,14 @@ def load_documents(data_path=DATA_DIR):
                 full_path = os.path.join(root, file_name)
                 loader = PyPDFLoader(full_path)
                 loaded_pages = loader.load()
+                restaurant_name = _extract_restaurant_name(file_name)
                 for page in loaded_pages:
                     page.page_content = re.sub(
                         r"\((\d+[.,]\d{2})\s*\):",
                         r"(\1 €):",
                         page.page_content
                     )
+                    page.metadata["restaurant"] = restaurant_name
                 docs.extend(loaded_pages)
 
     if not docs:
@@ -73,17 +80,12 @@ def split_documents(docs, chunk_size=600, chunk_overlap=80):
         chunk_overlap=chunk_overlap
     )
     chunks = text_splitter.split_documents(docs)
-    # Prefix every chunk with its restaurant, so a dish chunk still "knows" which
-    # restaurant it belongs to (improves retrieval for "Hamburguesa Babylon", etc.).
     for chunk in chunks:
-        chunk.page_content = f"Restaurante: {restaurant_from_path(chunk.metadata.get('source', ''))}\n{chunk.page_content}"
+        restaurant = chunk.metadata.get("restaurant", "")
+        if restaurant and not chunk.page_content.startswith(f"[Restaurante: {restaurant}]"):
+            chunk.page_content = f"[Restaurante: {restaurant}]\n{chunk.page_content}"
     return chunks
 
-
-def restaurant_from_path(path: str) -> str:
-    """'data/11. Restaurante_Tubal.pdf' -> 'Restaurante Tubal'."""
-    stem = os.path.splitext(os.path.basename(path))[0]
-    return re.sub(r"^\d+\.\s*", "", stem).replace("_", " ")
 
 
 @lru_cache(maxsize=1)
@@ -231,7 +233,7 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
         raise BackendError("Falta configurar GOOGLE_API_KEY en el archivo .env.")
 
     top_k = int(settings.get("top_k", 4))
-    model_name = settings.get("model") or DEFAULT_MODEL
+    model_name = settings.get("model") or DEFAULT_LLM_MODEL
     temperature = float(settings.get("temperature", 0.2))
 
     try:
@@ -241,8 +243,10 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
             google_api_key=api_key.strip()
         )
 
+        # Estrategia Moving Window: conservar solo los últimos N mensajes
+        recent_history = history[-MAX_HISTORY_MESSAGES:]
         chat_history = []
-        for msg in history:
+        for msg in recent_history:
             if msg.get("role") == "user":
                 chat_history.append(HumanMessage(content=msg.get("content", "")))
             elif msg.get("role") == "assistant":
@@ -275,7 +279,7 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
         context_blocks = []
         for doc, relevance in results:
             file_name = os.path.basename(doc.metadata.get("source", "documento.pdf"))
-            restaurant_name = restaurant_from_path(file_name)
+            restaurant_name = doc.metadata.get("restaurant") or _extract_restaurant_name(file_name)
             page_num = int(doc.metadata.get("page", 0)) + 1
 
             sources.append(Source(
@@ -320,6 +324,8 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
             debug={
                 "rewritten_query": search_query,
                 "model": model_name,
+                "embedding_model": EMBEDDING_MODEL,
+                "memory_strategy": f"moving_window ({MAX_HISTORY_MESSAGES} msgs)",
                 "retrieval_ms": retrieval_ms,
                 "generation_ms": generation_ms,
             }
