@@ -370,9 +370,13 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
                     "system",
                     "Rewrite the user's latest message as a complete, standalone search query for a "
                     "restaurant guide, using the conversation memory and the last exchange. Do NOT answer it. "
-                    "Resolve references ('it', 'those', 'the first burger I asked about') into explicit dish "
-                    "or restaurant names. If the message does not depend on the conversation, return it "
-                    "EXACTLY unchanged. Return only the query.\n\nConversation memory:\n{memory}"
+                    "Resolve ONLY ambiguous references ('it', 'those', 'that restaurant', 'the first burger I asked about') "
+                    "into explicit dish or restaurant names. "
+                    "CRITICAL: If the user explicitly names a NEW dish or restaurant (e.g. 'Hamburguesa Babylon'), "
+                    "do NOT carry over restaurants or dishes from previous turns; remove personal introductions "
+                    "(e.g. 'My name is...') and keep only the food search query. "
+                    "If the message is already standalone, return it unchanged. Return only the query.\n\n"
+                    "Conversation memory:\n{memory}"
                 ),
                 MessagesPlaceholder(variable_name="chat_history"),
                 ("human", "{input}")

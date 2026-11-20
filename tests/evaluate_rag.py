@@ -92,13 +92,22 @@ STRESS = [
 def run(cases: list[Case], continuous: bool) -> int:
     history: list[dict] = []
     failures = 0
+    pause_s = 6 if continuous else 3
     for i, case in enumerate(cases, 1):
+        if i > 1:
+            time.sleep(pause_s)
         t0 = time.perf_counter()
-        try:
-            r = ask(case.question, history if continuous else [], dict(DEFAULT_SETTINGS))
-            answer, grounded = str(r.answer), r.grounded
-        except Exception as exc:  # noqa: BLE001
-            answer, grounded = f"EXCEPTION {type(exc).__name__}: {exc}", None
+        answer, grounded = "", None
+        for attempt in range(2):
+            try:
+                r = ask(case.question, history if continuous else [], dict(DEFAULT_SETTINGS))
+                answer, grounded = str(r.answer), r.grounded
+                break
+            except Exception as exc:  # noqa: BLE001
+                if attempt == 0 and ("429" in str(exc) or "RESOURCE_EXHAUSTED" in str(exc)):
+                    time.sleep(35)
+                    continue
+                answer, grounded = f"EXCEPTION {type(exc).__name__}: {exc}", None
         dt = time.perf_counter() - t0
 
         problems = []

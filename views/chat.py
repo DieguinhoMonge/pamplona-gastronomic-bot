@@ -14,6 +14,12 @@ from frontend.ui import (ICONS, SUGGESTIONS, chat_history, copy_button, current_
 
 INPUT_PLACEHOLDER = "Ask about restaurants, dishes, prices…"
 
+AI_NOTICE_HTML = (
+    '<div style="text-align:center;font-size:0.75rem;opacity:0.65;margin-top:0.85rem;">'
+    "AI Assistant (EU AI Act · Limited Risk): Txoko generates responses using AI "
+    "grounded strictly in the 20 restaurant documents."
+    "</div>"
+)
 
 @st.cache_data(show_spinner=False)
 def n_restaurants() -> int:
@@ -105,7 +111,9 @@ def render_empty() -> str | None:
     with st.container(horizontal=True, horizontal_alignment="center"):
         st.pills("Suggestions", SUGGESTIONS, key="suggest_pill", label_visibility="collapsed",
                  on_change=queue_from_pill, args=("suggest_pill",))
+    st.html(AI_NOTICE_HTML)
     return typed
+    
 
 
 # ----------------------------------------------------------------------------- generation
@@ -188,6 +196,7 @@ else:
             render_user(m)
         else:
             render_assistant(m, is_last=(idx == len(msgs) - 1) and not pending)
+    st.html(AI_NOTICE_HTML)
     typed = st.chat_input(INPUT_PLACEHOLDER, key="chat_input")
 
 question = (typed or pending or "").strip()
