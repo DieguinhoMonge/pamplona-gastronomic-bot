@@ -24,6 +24,13 @@ load_dotenv()
 DATA_DIR = "data"
 CHROMA_DIR = "chroma_db"
 COLLECTION_NAME = "pamplona_restaurants"
+EMBEDDING_MODEL = "sentence-transformers/paraphrase-multilingual-MiniLM-L12-v2"
+DEFAULT_LLM_MODEL = "gemini-3.5-flash-lite"
+MAX_HISTORY_MESSAGES = 6  # Moving window: últimos 3 turnos (usuario + asistente)
+
+
+def _extract_restaurant_name(file_name: str) -> str:
+    return re.sub(r"^\d+\.\s*", "", os.path.splitext(file_name)[0]).replace("_", " ")
 
 
 def load_documents(data_path=DATA_DIR):
@@ -37,12 +44,14 @@ def load_documents(data_path=DATA_DIR):
                 full_path = os.path.join(root, file_name)
                 loader = PyPDFLoader(full_path)
                 loaded_pages = loader.load()
+                restaurant_name = _extract_restaurant_name(file_name)
                 for page in loaded_pages:
                     page.page_content = re.sub(
                         r"\((\d+[.,]\d{2})\s*\):",
                         r"(\1 €):",
                         page.page_content
                     )
+                    page.metadata["restaurant"] = restaurant_name
                 docs.extend(loaded_pages)
 
     if not docs:
@@ -56,11 +65,16 @@ def split_documents(docs, chunk_size=600, chunk_overlap=80):
         chunk_size=chunk_size,
         chunk_overlap=chunk_overlap
     )
-    return text_splitter.split_documents(docs)
+    chunks = text_splitter.split_documents(docs)
+    for chunk in chunks:
+        restaurant = chunk.metadata.get("restaurant", "")
+        if restaurant and not chunk.page_content.startswith(f"[Restaurante: {restaurant}]"):
+            chunk.page_content = f"[Restaurante: {restaurant}]\n{chunk.page_content}"
+    return chunks
 
 
 def get_vectorstore():
-    embeddings = HuggingFaceEmbeddings(model_name="sentence-transformers/all-MiniLM-L6-v2")
+    embeddings = HuggingFaceEmbeddings(model_name=EMBEDDING_MODEL)
 
     if os.path.exists(CHROMA_DIR) and os.listdir(CHROMA_DIR):
         return Chroma(
@@ -88,7 +102,7 @@ def get_rag_chain():
     retriever = vectorstore.as_retriever(search_kwargs={"k": 4})
 
     llm = ChatGoogleGenerativeAI(
-        model="gemini-3.5-flash-lite",
+        model=DEFAULT_LLM_MODEL,
         google_api_key=api_key.strip()
     )
 
@@ -99,7 +113,7 @@ def get_rag_chain():
         "1. Si la respuesta no está en el contexto, responde exactamente: "
         "'No dispongo de esa información en la guía gastronómica.'\n"
         "2. No inventes platos, precios, ubicaciones ni datos externos.\n"
-        "3. Mantén un tono cordial,amable, claro y conciso.\n\n"
+        "3. Mantén un tono cordial, claro y conciso.\n\n"
         "Contexto:\n{context}"
     )
 
@@ -131,7 +145,7 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
         raise BackendConnectionError("Falta configurar GOOGLE_API_KEY en el archivo .env.")
 
     top_k = int(settings.get("top_k", 4))
-    model_name = settings.get("model") or "gemini-3.5-flash-lite"
+    model_name = settings.get("model") or DEFAULT_LLM_MODEL
 
     try:
         llm = ChatGoogleGenerativeAI(
@@ -139,8 +153,10 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
             google_api_key=api_key.strip()
         )
 
+        # Estrategia Moving Window: conservar solo los últimos N mensajes
+        recent_history = history[-MAX_HISTORY_MESSAGES:]
         chat_history = []
-        for msg in history:
+        for msg in recent_history:
             if msg.get("role") == "user":
                 chat_history.append(HumanMessage(content=msg.get("content", "")))
             elif msg.get("role") == "assistant":
@@ -172,7 +188,7 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
         context_blocks = []
         for doc, dist in results:
             file_name = os.path.basename(doc.metadata.get("source", "documento.pdf"))
-            restaurant_name = re.sub(r"^\d+\.\s*", "", os.path.splitext(file_name)[0]).replace("_", " ")
+            restaurant_name = doc.metadata.get("restaurant") or _extract_restaurant_name(file_name)
             page_num = int(doc.metadata.get("page", 0)) + 1
             relevance = round(1.0 / (1.0 + float(dist)), 3)
 
@@ -232,6 +248,8 @@ def ask(question: str, history: list[dict] | None = None, settings: dict | None 
             debug={
                 "rewritten_query": search_query,
                 "model": model_name,
+                "embedding_model": EMBEDDING_MODEL,
+                "memory_strategy": f"moving_window ({MAX_HISTORY_MESSAGES} msgs)",
                 "retrieval_ms": retrieval_ms,
                 "generation_ms": generation_ms,
             }
