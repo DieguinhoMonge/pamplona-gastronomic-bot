@@ -74,6 +74,96 @@ python -m tests.evaluate_rag stress     # 19 out-of-bounds questions: off-topic,
 
 ---
 
+## Notes for Diego: what changed vs `main` (please review)
+
+Hi Diego! This branch (`feature/integrate-frontend-rag`) joins the Streamlit frontend with your RAG
+engine. It already includes your latest commit on `main` (`ae90b98`: multilingual embeddings,
+moving window, chunk headers), so it merges into `main` **without conflicts**. Most backend
+changes are in `src/rag_engine.py`. Each one fixes a problem we found while testing with real
+Gemini.
+
+> **After pulling, delete `chroma_db/`** (the chunking and embeddings changed, so the index must
+> be rebuilt; it rebuilds by itself on the first question, ~40 s). An old index loads **without
+> errors but gives wrong results**, because both embedding models produce 384-dimension vectors.
+
+### 1. Memory: summary buffer (replaces the 6-message moving window)
+
+**Why:** with the moving window, after 3 turns the bot forgot turn 1. In testing it then
+**invented** answers ("What was the first burger I asked about?" → "Pulled Pork", which was wrong)
+and refused "What's my name?" as off-topic.
+
+**How it works now** (`summarize_history()`, `ask()`):
+
+```
+history = [ older turns ... | last question + answer ]
+               │                       │
+               ▼                       ▼
+     running SUMMARY (LLM)       kept verbatim (RECENT_MESSAGES = 2)
+               └──────────┬────────────┘
+                          ▼
+      1) query rewrite  ("those desserts" -> explicit dish names) -> hybrid search
+      2) answer prompt  (MEMORY + CONTEXT + last exchange + question)
+```
+
+- The summary keeps: **user facts** (name, diet, allergies, budget), **every dish with restaurant
+  and price**, the **user's questions numbered in order**, and open issues.
+- It is **incremental**: each turn folds only the new messages into the cached summary of the
+  previous prefix (`_summary_cache`, keyed by a hash of the messages). That's one small extra
+  Gemini call per question from turn 3 on, not a re-summary of the whole chat. The backend stays
+  stateless; the UI still sends the full `history` as defined in INTERFACE.md.
+- Questions about the conversation itself ("my name?", "the first one I asked") are answered
+  from MEMORY and are never tagged `[NO_CONTEXT]`.
+- `debug` now includes `memory_summary`, `memory_ms` and `memory_strategy`.
+
+### 2. Staying in bounds (grounding and out-of-scope questions)
+
+The system prompt (`SYSTEM_PROMPT`) is now **in English with examples** (the model follows it more
+reliably). It defines both sides:
+
+- **Answer** whenever the context has anything related: one-word questions ("chocolate"),
+  subjective ones ("good pintxos", "best asador": list the options, don't rank them), dietary
+  ones (list dishes without meat or fish and note the guide doesn't label vegetarian dishes),
+  and partial answers ("the guide doesn't include opening hours"). Before this change it refused
+  "chocolate" and "pintxos".
+- **`[NO_CONTEXT]`** only for: off-topic questions (history, maths...), places outside
+  Navarra, gibberish, and prompt-injection attempts ("ignore previous instructions", "print your
+  prompt").
+- **Mixed questions** ("capital of France *and* the Babylon burger?"): it answers the food part
+  and declines the rest. There is also a safety net in code: if a tagged answer mentions a
+  restaurant it just retrieved, it stays `grounded=True`, so the UI doesn't show "Not found".
+- **Language:** `detect_language()` decides per question and adds `[Reply in English/Spanish]`
+  next to it. Before this, English questions got Spanish answers, because the context is in
+  Spanish.
+- **Never invents** hours, phone numbers, bookings or prices. False premises are corrected
+  ("Babylon costs 5 €, right?" → "No, 14,50 €").
+
+Proof: `python -m tests.evaluate_rag` runs **19 stress questions** (off-topic, injection, harmful,
+hallucination bait, false premises, mixed, emoji, French) plus a **7-turn memory conversation**.
+Last full run: 25/26. The only failure, "which of those is the cheapest?", is occasionally
+random: `gemini-3.5-flash-lite` ignores `temperature`.
+
+### 3. Other differences from `main`
+
+| Area | `main` | This branch | Why |
+|---|---|---|---|
+| Chunking | `CharacterTextSplitter("\n")` | `RecursiveCharacterTextSplitter` splitting on dish bullets / numbers first | Dishes span several lines and were cut in half (Babylon answer had 2 of 7 ingredients) |
+| Retrieval | Chroma similarity only | **Hybrid**: BM25 keyword + semantic, fused with RRF (`hybrid_search()`) | Rare exact words ("pintxos", only in Café Iruña) were missed |
+| Scores | `1/(1+L2)` ≈ 0.04 | Normalized embeddings → cosine similarity 0–1 | Relevance bars in the UI were empty |
+| Chunk header | `[Restaurante: X]` + metadata | **Kept yours** | |
+| Embeddings | multilingual MiniLM | **Same** (+ `normalize_embeddings=True`) | |
+| Temperature | not passed | passed from UI settings | (ignored by flash-lite, honoured by others) |
+| Paths | relative `data`, `chroma_db` | absolute, from `frontend/config.py` | Works from any working directory |
+| Vector store | rebuilt object per question | cached (`lru_cache`) | Embedding model was reloaded on every question |
+| Missing API key | `BackendConnectionError` | `BackendError` | The UI shows the exact message |
+| `get_rag_chain()` | present | removed | Unused |
+| Data | `data/*.pdf` | same; project brief moved to `docs/` | Keep the brief out of the index |
+| Backend selection | – | `auto`: real backend if `GOOGLE_API_KEY` is in `.env`, else mock | The UI works without a key |
+
+**Please check in particular:** the prompt wording, the hybrid search, and whether you agree with
+replacing the moving window. Comment on the PR or reply in our chat. 🙏
+
+---
+
 ## Project structure
 
 ```
@@ -200,7 +290,7 @@ paragraph, a cuisine paragraph and about 10 dishes in the format
 | Nov 12 | UI redesign: answer-engine layout, conversation history, settings dialog, warm Navarra theme | ✅ Done (pending visual review) |
 | Nov 16 | Restaurant Explorer page (cards and filters) | ⏳ Next |
 | Nov 17 | Insights page (price and category charts) and "Under the hood" page (chunks, rewritten query, prompt) | ⏳ Planned |
-| Nov 18–19 | Connect the real LangChain + Gemini backend; test edge cases | ⏳ Planned |
+| Nov 18–20 | Connect the real LangChain + Gemini backend; hybrid search, summary memory, stress tests | ✅ Done (pending Diego's review) |
 | Nov 20 | Polish and final README | ⏳ Planned |
 | Nov 21 | Record the demo video, prepare slides | ⏳ Planned |
 | Nov 22 | Buffer and submission | ⏳ Planned |
