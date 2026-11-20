@@ -20,7 +20,7 @@ Final project for the AI Technology course. **Due: Sunday, November 22, 23:59.**
 | LLM & embeddings provider | **Google Gemini API** (LLM); local sentence-transformers embeddings |
 | Frontend in Streamlit or Chainlit | **Streamlit** (this repo, `app.py`) |
 | Strict grounding, no hallucinations | Backend prompt + `grounded` flag; the UI shows a "Not found in the knowledge base" state |
-| Context and memory for follow-up questions | Chat history is sent to the backend on every question |
+| Context and memory for follow-up questions | **Summary-buffer memory**: earlier turns are condensed into a running summary (user facts, dishes and prices discussed, numbered questions); the last exchange is kept verbatim. Follow-ups are rewritten into standalone search queries |
 | Error handling | Typed backend errors and a friendly error card with **Retry** |
 | Deliverables | Source code, a 2–3 minute demo video, and a 7-minute presentation |
 
@@ -57,6 +57,20 @@ The app opens at <http://localhost:8501>.
   in `data/`, delete `chroma_db/` so it is rebuilt.
 
 `.env` is git-ignored. **Never commit your API key.**
+
+---
+
+## Evaluation
+
+`tests/evaluate_rag.py` runs the real backend against two suites and prints a PASS/FAIL table
+(needs `GOOGLE_API_KEY`):
+
+```powershell
+python -m tests.evaluate_rag            # both suites
+python -m tests.evaluate_rag memory     # 7-turn conversation: references to earlier turns, user facts
+python -m tests.evaluate_rag stress     # 19 out-of-bounds questions: off-topic, prompt injection,
+                                        # harmful, hallucination bait, false premises, mixed questions
+```
 
 ---
 
