@@ -21,8 +21,7 @@
 7. [Automated Evaluation & Red-Teaming Suite](#7-automated-evaluation--red-teaming-suite)
 8. [Installation & Quick Start](#8-installation--quick-start)
 9. [Repository Structure](#9-repository-structure)
-10. [Demo Video (2–3 min) & Presentation (7 min) Production Guide](#10-demo-video-23-min--presentation-7-min-production-guide)
-11. [Team & Contributions](#11-team--contributions)
+
 
 ---
 
@@ -278,14 +277,3 @@ pamplona-gastronomic-bot/
 └─ requirements.txt             # Python dependencies
 ```
 
----
-
-## 10. Demo Video (2–3 min) & Presentation (7 min) Production Guide
-
-This section serves as a structured blueprint for recording the **2–3 minute live demo video** and assembling the **7-minute technical presentation**.
-
-### A. Pre-Recording Checklist (Video Demo)
-1. **Verify Live Mode:** Confirm the sidebar badge displays **`Live · Gemini`** (green indicator), never `Mock backend`.
-2. **Pre-Warm Cache:** Send one test question before starting the screen recording, then click **New chat** so the embedding model and Chroma index are already loaded in RAM (responses will run in **2–4 seconds** instead of ~35 s).
-3. **Avoid API Rate Limits (429):** Pause **4–5 seconds** between consecutive prompts during recording so Gemini's free-tier RPM limit is never triggered.
-4. **Clean Recording Environment:** Record at 1080p in a clean browser window (no OS watermarks, notifications muted) and keep the **EU AI Act notice** visible at the bottom of the chat.
